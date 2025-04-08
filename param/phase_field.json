@@ -1,0 +1,6 @@
+{
+  "step": 500,
+  "field_size": 80,
+  "epsilon_c": 0.018,
+  "epsilon_k": 0.13
+}
