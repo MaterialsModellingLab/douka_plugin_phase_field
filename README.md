@@ -54,11 +54,8 @@ cmake --install build/a64fx-release
 
 ### Run Data Assimilation
 ```shell
-./scripts/run.sh 8
+./scripts/run.sh
 ```
-
-The 1st argument is the number of cores that can be used for data assimilation.
-You can set the number of physical cores for the best performance.
 
 ### Show Results
 Usage
