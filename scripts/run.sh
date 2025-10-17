@@ -4,6 +4,51 @@
 
 set -e
 
+function job_executor() {
+  local cores=$1
+  local N=$2
+  local threads_per_proc=$3
+  local job_func=$4
+
+  local used_threads=0
+  declare -a pids=()
+  declare -a pid_threads=()
+
+  for (( i=0; i<N; i++ )); do
+    while (( used_threads + threads_per_proc > cores )); do
+      wait -n
+      used_threads=$(( used_threads - pid_threads[0] ))
+
+      pids=("${pids[@]:1}")
+      pid_threads=("${pid_threads[@]:1}")
+    done
+
+    ( OMP_NUM_THREADS=$threads_per_proc $job_func "$i" ) &
+    pid=$!
+    pids+=($pid)
+    pid_threads+=($threads_per_proc)
+    used_threads=$(( used_threads + threads_per_proc ))
+  done
+
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
+}
+
+# Resource detection
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  phys_cores=$(lscpu | awk '/^Core\(s\) per socket:/ {core=$4} /^Socket\(s\):/ {print core * $2}')
+  logi_cores=$(lscpu | awk '/^CPU\(s\):/ {print $2}')
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+  phys_cores=$(sysctl -n hw.physicalcpu)
+  logi_cores=$(sysctl -n hw.logicalcpu)
+else
+  echo "Unsupported OS: $OSTYPE" >&2
+  exit 1
+fi
+
+
+# Main script
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 BASE="${SCRIPT_DIR}/.."
 NAME="phase_field"
@@ -31,48 +76,35 @@ fi
 # Copy initial state
 cp output/init/* output/state
 
-if [ "$#" -ne 1 ]; then
-  echo "Usage: $0 <number_of_cpu_cores>"
-  exit 1
-fi
-num_cores=$1
-if ! [[ "$num_cores" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Error: Number of CPU cores must be a positive integer."
-  exit 1
-fi
-
 # T is file number - 1 of ./output/obs directory
 T=$(ls output/obs/${NAME}*.json | wc -l | awk '{print $1-1}')
 # N is file number of ./output/init directory
 N=$(ls output/init/${NAME}*.json | wc -l)
 
-for (( t = 0; t < T; t++)); do
-  SYS_TIM=$(printf "%06d" $t)
-  OBS_TIM=$(printf "%06d" $t)
+# Tuned parameters
+prediction_threads_per_proc=2
 
-  echo "Predict ${OBS_TIM}"
-  OMP_NUM_THREADS=$(( $num_cores / $N ))
-  for (( i = 0; i < N; i++)); do
-    STATE_FILE=$(printf ${NAME}_%04d_${SYS_TIM}_${OBS_TIM}.json $i)
+for (( t = 0; t < T; t++)); do
+  function predict_job() {
+    local i=$1
     douka predict \
-      --state        output/state/${STATE_FILE} \
+      --state        output/state/$(printf ${NAME}_%04d_%06d_%06d.json $i $t $t) \
       --param        output/param/${NAME}.predict.json \
       --plugin       ${NAME} \
       --plugin_param param/${NAME}.json \
       --output       output/state \
-      >> output/${NAME}.log &
-  done
-  wait
+      >> output/${NAME}.log
+  }
 
-  SYS_TIM=$(printf "%06d" $(( t + 1 )))
-  STATE_FILE=${NAME}_%04d_${SYS_TIM}_${OBS_TIM}.json
+  echo "Predict ${t}"
+  job_executor $phys_cores $N $prediction_threads_per_proc predict_job
 
-  echo "Filter  ${OBS_TIM}"
-  OMP_NUM_THREADS=$num_cores
+  echo "Filter  ${t}"
+  OMP_NUM_THREADS=$(( $phys_cores )) \
   douka filter \
-      --state  output/state/${STATE_FILE} \
+      --state  output/state/${NAME}_%04d_$(printf '%06d' $((t + 1)))_$(printf '%06d' $t).json \
       --param  output/param/${NAME}.filter-enkf.json \
-      --obs    output/obs/${NAME}_obs_${SYS_TIM}.json \
+      --obs    output/obs/${NAME}_obs_$(printf '%06d' $((t + 1))).json \
       --output output/state \
       >> output/${NAME}.log
 done
